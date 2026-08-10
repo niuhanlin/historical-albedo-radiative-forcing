@@ -14,10 +14,14 @@ Reconstructs monthly global snow cover fraction (SCF) for 1901–2000 using
 monthly CRU TS v4.08 climate variables and MODIS SCF observations from
 2001–2023.
 
-For every target grid cell and calendar month, observations from the same month
-in 2001–2023 are selected according to temperature similarity and weighted by
-similarity in climate, temperature and latitude. A local weighted prediction is
-then produced independently for each target grid cell.
+For every target grid cell and calendar month, same-month observations from
+2001–2023 are screened using an initial monthly mean temperature tolerance of
+±2 °C. If fewer than 250 candidates are available, the tolerance is increased
+by a factor of 1.5 up to a maximum of ±5 °C. All candidates within the final
+tolerance are weighted by composite climate distance, mean temperature
+difference and latitude difference. The weighted samples are then used to fit a
+local ridge regression for the target grid cell. The climate, temperature and
+latitude decay scales are 2.5, 2.0 °C and 6.0°, respectively.
 
 The script then creates a unified set of yearly SCF files:
 
@@ -160,6 +164,8 @@ variables without modifying the source code:
 ```text
 HISTSNOW_DATA_DIR
 HISTSNOW_OUTPUT_DIR
+HISTSNOW_MAX_DONORS_PER_YEAR_MONTH
+HISTSNOW_MAX_TOTAL_DONORS_PER_MONTH
 ALBEDO_DATA_DIR
 SNOWFREE_ALBEDO_DIR
 SNOWCOVERED_ALBEDO_DIR
@@ -171,6 +177,10 @@ RADIATIVE_KERNEL_DIR
 ALBEDO_ROOT
 RF_OUTPUT_DIR
 ```
+
+The two `HISTSNOW_MAX_*` donor caps are disabled by default so that the
+manuscript calculation uses all available candidates. They may be set to
+positive integers only for memory-constrained exploratory runs.
 
 `ALBEDO_OUTPUT_DIR` and `ALBEDO_ROOT` must refer to the same albedo-synthesis
 directory when non-default locations are used.
