@@ -55,25 +55,13 @@ alpha_sn = sum_c(f_c * alpha_sn,c)
 alpha    = (1 - SCF) * alpha_sf + SCF * alpha_sn
 ```
 
-The five reported land-cover classes are:
+The five input bands, in order, are:
 
 1. Forest
 2. Shrubland
 3. Grassland
 4. Cropland
 5. Non-vegetated land
-
-The source fraction stack contains eight bands. The four forest
-subtypes (ENF, EBF, DNF and DBF) are grouped into the single forest class by
-summing their contributions. This aggregation preserves their combined albedo
-contribution exactly.
-
-The script produces two internally consistent albedo experiments:
-
-| Output | Land-cover fractions | SCF |
-|---|---|---|
-| `dynamic` | Vary annually | Varies monthly and annually |
-| `fixed1700` | Vary annually | Fixed at monthly 1700 values |
 
 Monthly output naming:
 
@@ -82,9 +70,6 @@ albedo_synthesis_5LC_1700_2023/
 ├── dynamic/monthly/albedo_weighted_<YEAR>_<MONTH>_0p25deg_global_wgs84.tif
 └── fixed1700/monthly/albedo_weighted_<YEAR>_<MONTH>_0p25deg_global_wgs84.tif
 ```
-
-Source band 7 is defined as total cropland, including rice. The script verifies
-that all land-cover fractions sum to approximately one.
 
 ### 3. `calculate_albedo_radiative_forcing.py`
 
