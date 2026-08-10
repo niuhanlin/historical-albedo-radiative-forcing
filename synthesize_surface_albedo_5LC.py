@@ -36,6 +36,7 @@ gdal.SetConfigOption("GDAL_CACHEMAX", "2048")
 # =============================================================================
 YEAR_START, YEAR_END = 1700, 2023
 FIXED_SCF_YEAR = 1700
+LOOKUP_YEAR = 2020
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("ALBEDO_DATA_DIR", PROJECT_DIR / "data"))
@@ -173,7 +174,12 @@ def postprocess_albedo(raw: np.ndarray, nodata) -> np.ndarray:
     return arr
 
 
-def find_endmember_file(condition: str, source_name: str, year: int, month: int) -> Path:
+def find_endmember_file(condition: str, source_name: str, month: int) -> Path:
+    """Return the fixed 2020 monthly albedo lookup map.
+
+    The manuscript holds the lookup-table albedos fixed across 1700–2023.
+    Consequently, target-year lookup files must never be selected here.
+    """
     if condition == "snowfree":
         root = NOSNOW_ALBEDO_DIR
         labels = ("albedoNoSnow", "albedoNosnow")
@@ -188,9 +194,8 @@ def find_endmember_file(condition: str, source_name: str, year: int, month: int)
     for label in labels:
         patterns.extend(
             [
-                str(folder / f"{source_name}_{label}_{year}_{month:02d}_0p25deg_global_wgs84*_from2020.tif"),
-                str(folder / f"{source_name}_{label}_{year}_{month:02d}_0p25deg_global_wgs84*.tif"),
-                str(folder / f"{source_name}_{label}_2020_{month:02d}_0p25deg_global_wgs84*.tif"),
+                str(folder / f"{source_name}_{label}_{LOOKUP_YEAR}_{month:02d}_0p25deg_global_wgs84*_from2020.tif"),
+                str(folder / f"{source_name}_{label}_{LOOKUP_YEAR}_{month:02d}_0p25deg_global_wgs84*.tif"),
             ]
         )
     return choose_first_match(patterns)
@@ -199,14 +204,13 @@ def find_endmember_file(condition: str, source_name: str, year: int, month: int)
 def read_endmember(
     condition: str,
     source_name: str,
-    year: int,
     month: int,
     ref_gt,
     ref_projection,
     rows: int,
     cols: int,
 ) -> np.ndarray:
-    path = find_endmember_file(condition, source_name, year, month)
+    path = find_endmember_file(condition, source_name, month)
     ds = open_raster(path)
     assert_grid(ds, ref_gt, ref_projection, rows, cols, str(path))
     band = ds.GetRasterBand(1)
@@ -341,7 +345,6 @@ def synthesize_state_albedo(
         endmember = read_endmember(
             condition,
             source_name,
-            year,
             month,
             ref_gt,
             ref_projection,
