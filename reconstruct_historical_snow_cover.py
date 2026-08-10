@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """Reconstruct monthly historical snow cover fraction at 0.25° resolution.
 
-For each target grid cell and calendar month, the method identifies donor
-observations from 2001–2023 that satisfy temperature and latitude similarity
-constraints. A local two-stage model estimates (1) the probability of positive
-snow cover and (2) the magnitude conditional on positive snow cover.
+For each target grid cell and calendar month, STIM-Snow identifies same-month
+donor observations from 2001–2023 using monthly mean temperature similarity.
+The temperature tolerance starts at ±2 °C and increases by a factor of 1.5
+when fewer than 250 donors are available, up to a maximum of ±5 °C. Donors
+within the final tolerance are weighted by composite climate distance, mean
+temperature difference and latitude difference. The weighted samples are used
+to fit a local ridge regression for the target grid cell.
 
 The workflow performs year-stratified training, validation and testing,
 rebuilds the final donor libraries from the complete 2001–2023 observation
@@ -12,10 +15,8 @@ period, reconstructs monthly snow cover fraction for 1901–2000, and exports a
 continuous 1700–2023 product. Monthly 1901 values are repeated for 1700–1900,
 consistent with the reconstruction protocol described in the manuscript.
 
-Donor-search tolerances begin at ±2 °C and ±10° latitude. When fewer than 250
-donors are available, they are progressively relaxed, but never beyond ±5 °C
-and ±15° latitude. Predictions remain missing if no donor satisfies the maximum
-tolerances.
+Predictions remain missing when no same-month donor satisfies the maximum
+temperature tolerance.
 """
 
 import os
@@ -52,7 +53,7 @@ warnings.filterwarnings("ignore")
 # =========================================================
 PREDICT_FULL_FIELDS = False         # Full-field predictions for evaluation years
 PREDICT_HISTORICAL_FIELDS = True    # Reconstruct 1901–2000 using all observations
-SAVE_LOCAL_INFO = False             # Save donor count and selected tolerances
+SAVE_LOCAL_INFO = False             # Save donor count and selected temperature tolerance
 
 # Only monthly snow cover fraction (areaFrac) is required by the manuscript.
 HISTORICAL_TARGETS = ("areaFrac",)
@@ -124,30 +125,42 @@ LON_ARR = np.linspace(-180 + 0.125, 180 - 0.125, 1440).astype(np.float32)
 # =========================================================
 # Donor-library settings
 # =========================================================
-MAX_DONORS_PER_YEAR_MONTH = 80000
-MAX_TOTAL_DONORS_PER_MONTH = 900000
+def _optional_positive_int_env(name):
+    value = int(os.environ.get(name, "0"))
+    return value if value > 0 else None
+
+
+# The manuscript method uses all available same-month observations. Optional
+# caps are disabled by default and are provided only for constrained systems.
+MAX_DONORS_PER_YEAR_MONTH = _optional_positive_int_env(
+    "HISTSNOW_MAX_DONORS_PER_YEAR_MONTH"
+)
+MAX_TOTAL_DONORS_PER_MONTH = _optional_positive_int_env(
+    "HISTSNOW_MAX_TOTAL_DONORS_PER_MONTH"
+)
 SAVE_DONOR_LIBRARY = True
 
 # =========================================================
-# Local donor-selection settings
+# Local donor-selection and regression settings
 # =========================================================
 TEMP_THRESH_INIT_C = 2.0
 TEMP_THRESH_MAX_C = 5.0
 TEMP_THRESH_GROW = 1.5
-
-LAT_THRESH_INIT_DEG = 10.0
-LAT_THRESH_MAX_DEG = 15.0
-LAT_THRESH_GROW = 1.5
-
 MIN_DONORS = 250
-MIN_POS_DONORS = 40
-TOPK_AFTER_WEIGHT = 120
 RIDGE_LAMBDA = 2.0
 MIN_WEIGHT_SUM = 1e-8
 
-SIGMA_TEMP = 2.0
-SIGMA_LAT = 6.0
-SIGMA_FEAT = 2.5
+SIGMA_CLIM = 2.5
+SIGMA_TEMP_C = 2.0
+SIGMA_LAT_DEG = 6.0
+
+# Composite climate distance in Equation S3 excludes monthly mean temperature,
+# which enters the weighting function as a separate term.
+CLIM_DISTANCE_FEATURES = ("pre", "tmn", "tmx", "wet")
+CLIM_DISTANCE_INDICES = np.array(
+    [BASE_FEATS.index(name) for name in CLIM_DISTANCE_FEATURES],
+    dtype=np.int64,
+)
 
 # =========================================================
 # Evaluation settings
@@ -160,14 +173,6 @@ EVAL_METRICS_USE_SAMPLED_POINTS = True
 FULLFIELD_BLOCK_SIZE = 4000
 FULLFIELD_N_JOBS = int(os.environ.get("HISTSNOW_FULLFIELD_N_JOBS", str(N_JOBS)))
 FULLFIELD_VERBOSE = 10
-
-# =========================================================
-# Documented replacement for a missing observation month
-# =========================================================
-MISSING_MONTHLY_MAT_SUB = {
-    (2010, 1): (2009, 1),
-}
-_logged_subs = set()
 
 # =========================================================
 # Plot style
@@ -204,25 +209,10 @@ def resolve_monthly_mat_fp(ym_to_fp, year, month, mat_dir):
     fp = ym_to_fp.get((year, month))
     if fp is not None:
         return fp
-
-    sub = MISSING_MONTHLY_MAT_SUB.get((year, month))
-    if sub is not None:
-        fp2 = ym_to_fp.get(sub)
-        if fp2 is None:
-            raise RuntimeError(
-                f"Missing monthly MAT for {year}-{month:02d}; the documented "
-                f"replacement {sub[0]}-{sub[1]:02d} is also unavailable in {mat_dir}."
-            )
-        key = ((year, month), sub)
-        if key not in _logged_subs:
-            print(
-                f"WARNING: {year}-{month:02d} is unavailable; using the documented "
-                f"replacement {sub[0]}-{sub[1]:02d}: {os.path.basename(fp2)}"
-            )
-            _logged_subs.add(key)
-        return fp2
-
-    raise RuntimeError(f"Missing monthly MAT for {year}-{month:02d} in {mat_dir}")
+    raise RuntimeError(
+        f"Missing monthly MODIS SCF MAT file for {year}-{month:02d} in {mat_dir}. "
+        "The manuscript workflow requires a complete 2001–2023 monthly record."
+    )
 
 
 def sel_year_month(ds_or_da, year, month):
@@ -481,16 +471,26 @@ def _safe_stratified_split(X, y, test_size, random_state):
 def split_years_stratified_train_val_test(y_da, years, seed=42):
     years_arr, strata = _compute_year_strata(y_da, years, n_pix=STRAT_N_PIX, n_bins=STRAT_BINS, seed=seed)
 
+    n_years = len(years_arr)
+    n_test = max(1, int(round(RATIO_TEST * n_years)))
+    n_val = max(1, int(round(RATIO_VAL * n_years)))
+    if n_test + n_val >= n_years:
+        raise RuntimeError(
+            "Not enough years to form non-empty training, validation and test sets."
+        )
+
     idx_trainval, idx_test = _safe_stratified_split(
-        X=years_arr, y=strata, test_size=RATIO_TEST, random_state=seed
+        X=years_arr, y=strata, test_size=n_test, random_state=seed
     )
     years_trainval = years_arr[idx_trainval]
     strata_trainval = strata[idx_trainval]
     years_test = years_arr[idx_test]
 
-    val_in_trainval = RATIO_VAL / (1.0 - RATIO_TEST)
     idx_train, idx_val = _safe_stratified_split(
-        X=years_trainval, y=strata_trainval, test_size=val_in_trainval, random_state=seed + 1
+        X=years_trainval,
+        y=strata_trainval,
+        test_size=n_val,
+        random_state=seed + 1,
     )
     years_train = years_trainval[idx_train]
     years_val = years_trainval[idx_val]
@@ -568,7 +568,10 @@ def build_single_month_donor_library(month, cru, y_da, train_years, target_name)
         if idx.size == 0:
             continue
 
-        if idx.size > MAX_DONORS_PER_YEAR_MONTH:
+        if (
+            MAX_DONORS_PER_YEAR_MONTH is not None
+            and idx.size > MAX_DONORS_PER_YEAR_MONTH
+        ):
             idx = rng.choice(idx, size=MAX_DONORS_PER_YEAR_MONTH, replace=False)
 
         X = stacked_feature_matrix_from_flat(flat_feats, idx)
@@ -589,7 +592,10 @@ def build_single_month_donor_library(month, cru, y_da, train_years, target_name)
     tmp_cur = np.hstack(tmp_list).astype(np.float32, copy=False)
     latv = np.hstack(lat_list).astype(np.float32, copy=False)
 
-    if X.shape[0] > MAX_TOTAL_DONORS_PER_MONTH:
+    if (
+        MAX_TOTAL_DONORS_PER_MONTH is not None
+        and X.shape[0] > MAX_TOTAL_DONORS_PER_MONTH
+    ):
         keep = rng.choice(X.shape[0], size=MAX_TOTAL_DONORS_PER_MONTH, replace=False)
         X = X[keep]
         y = y[keep]
@@ -634,7 +640,7 @@ def build_all_month_donor_libraries(cru, y_da, train_years, target_name):
 
 
 # =========================================================
-# Local donor search and two-stage model
+# Local donor search, weighting and ridge regression
 # =========================================================
 def _sorted_tmp_candidate_idx(lib, tmp_q, temp_thr):
     left = np.searchsorted(lib["tmp_sorted_vals"], tmp_q - temp_thr, side="left")
@@ -644,38 +650,21 @@ def _sorted_tmp_candidate_idx(lib, tmp_q, temp_thr):
     return lib["tmp_sorted_idx"][left:right]
 
 
-def _select_local_donors(lib, xq, tmp_q, lat_q):
+def _select_local_donors(lib, tmp_q):
+    """Select same-month donors using the adaptive temperature threshold."""
     temp_thr = TEMP_THRESH_INIT_C
-    lat_thr = LAT_THRESH_INIT_DEG
-
     cand = np.empty((0,), dtype=np.int64)
+
     while True:
-        idx_temp = _sorted_tmp_candidate_idx(lib, tmp_q, temp_thr)
-        if idx_temp.size > 0:
-            dlat = np.abs(lib["lat"][idx_temp] - lat_q)
-            cand = idx_temp[dlat <= lat_thr]
-        else:
-            cand = idx_temp
-
-        if cand.size >= MIN_DONORS:
+        cand = _sorted_tmp_candidate_idx(lib, tmp_q, temp_thr)
+        if cand.size >= MIN_DONORS or temp_thr >= TEMP_THRESH_MAX_C:
             break
 
-        grown = False
-        if temp_thr < TEMP_THRESH_MAX_C:
-            temp_thr = min(TEMP_THRESH_MAX_C, temp_thr * TEMP_THRESH_GROW)
-            grown = True
-        if (cand.size < MIN_DONORS) and (lat_thr < LAT_THRESH_MAX_DEG):
-            lat_thr = min(LAT_THRESH_MAX_DEG, lat_thr * LAT_THRESH_GROW)
-            grown = True
+        temp_thr = min(TEMP_THRESH_MAX_C, temp_thr * TEMP_THRESH_GROW)
 
-        if not grown:
-            break
-
-    # Enforce the stated maximum tolerances. If no donor satisfies both
-    # |delta T| <= 5 °C and |delta latitude| <= 15°, return an empty set and
-    # retain a missing prediction. No unconstrained fallback is used.
-
-    return cand, float(temp_thr), float(lat_thr)
+    # If fewer than MIN_DONORS remain at ±5 °C, all available donors within
+    # that maximum threshold are retained, as described in Supplementary S1.3.
+    return cand, float(temp_thr)
 
 
 def _kernel_weights(lib, cand_idx, xq, tmp_q, lat_q):
@@ -683,28 +672,23 @@ def _kernel_weights(lib, cand_idx, xq, tmp_q, lat_q):
     tc = lib["tmp_cur"][cand_idx]
     lc = lib["lat"][cand_idx]
 
-    xqz = (xq - lib["feat_mean"]) / lib["feat_std"]
-    Xcz = (Xc - lib["feat_mean"]) / lib["feat_std"]
+    clim_idx = CLIM_DISTANCE_INDICES
+    clim_mean = lib["feat_mean"][clim_idx]
+    clim_std = lib["feat_std"][clim_idx]
+    xqz = (xq[clim_idx] - clim_mean) / clim_std
+    Xcz = (Xc[:, clim_idx] - clim_mean[None, :]) / clim_std[None, :]
 
-    dfeat = np.sqrt(np.mean((Xcz - xqz[None, :]) ** 2, axis=1))
+    # Equation S3 defines d_clim as the Euclidean distance across the four
+    # standardized climate variables: pre, tmn, tmx and wet.
+    dclim = np.sqrt(np.sum((Xcz - xqz[None, :]) ** 2, axis=1))
     dtmp = np.abs(tc - tmp_q)
     dlat = np.abs(lc - lat_q)
 
-    w_feat = np.exp(-0.5 * (dfeat / SIGMA_FEAT) ** 2)
-    w_temp = np.exp(-0.5 * (dtmp / SIGMA_TEMP) ** 2)
-    w_lat = np.exp(-0.5 * (dlat / SIGMA_LAT) ** 2)
+    w_clim = np.exp(-0.5 * (dclim / SIGMA_CLIM) ** 2)
+    w_temp = np.exp(-0.5 * (dtmp / SIGMA_TEMP_C) ** 2)
+    w_lat = np.exp(-0.5 * (dlat / SIGMA_LAT_DEG) ** 2)
 
-    w = (w_feat * w_temp * w_lat).astype(np.float64)
-    return w, dfeat
-
-
-def _weighted_topk(cand_idx, weights, dfeat, topk):
-    n = cand_idx.size
-    if n <= topk:
-        return cand_idx, weights
-    score = -np.log(np.maximum(weights, 1e-12)) + dfeat
-    pos = np.argpartition(score, kth=topk - 1)[:topk]
-    return cand_idx[pos], weights[pos]
+    return (w_clim * w_temp * w_lat).astype(np.float64)
 
 
 def _fit_weighted_ridge_predict(X_train, y_train, w_train, xq, lam=RIDGE_LAMBDA):
@@ -738,40 +722,29 @@ def _fit_weighted_ridge_predict(X_train, y_train, w_train, xq, lam=RIDGE_LAMBDA)
     return float(xqd @ beta)
 
 
-def predict_one_query_local_two_stage(lib, xq, tmp_q, lat_q):
-    cand_idx, temp_thr_used, lat_thr_used = _select_local_donors(lib, xq, tmp_q, lat_q)
+def predict_one_query_local_ridge(lib, xq, tmp_q, lat_q):
+    """Predict SCF using all selected donors in one weighted ridge model."""
+    cand_idx, temp_thr_used = _select_local_donors(lib, tmp_q)
     if cand_idx.size == 0:
-        return np.nan, 0, temp_thr_used, lat_thr_used
+        return np.nan, 0, temp_thr_used
 
-    w, dfeat = _kernel_weights(lib, cand_idx, xq, tmp_q, lat_q)
-    cand_idx, w = _weighted_topk(cand_idx, w, dfeat, TOPK_AFTER_WEIGHT)
-
+    w = _kernel_weights(lib, cand_idx, xq, tmp_q, lat_q)
     yc = lib["y"][cand_idx]
     Xc = lib["X"][cand_idx]
 
     if yc.size == 0 or np.sum(w) < MIN_WEIGHT_SUM:
-        return np.nan, int(cand_idx.size), temp_thr_used, lat_thr_used
+        return np.nan, int(cand_idx.size), temp_thr_used
 
-    pos_mask = yc > EPS_POS
-    p_pos = float(np.sum(w[pos_mask]) / np.sum(w)) if np.sum(w) > 0 else 0.0
-
-    if np.sum(pos_mask) >= MIN_POS_DONORS:
-        yreg = _fit_weighted_ridge_predict(
-            X_train=Xc[pos_mask],
-            y_train=yc[pos_mask],
-            w_train=w[pos_mask],
-            xq=xq,
-            lam=RIDGE_LAMBDA
-        )
-    elif np.sum(pos_mask) > 0:
-        yreg = float(np.average(yc[pos_mask], weights=w[pos_mask]))
-    else:
-        yreg = 0.0
-
-    pred = p_pos * yreg
+    pred = _fit_weighted_ridge_predict(
+        X_train=Xc,
+        y_train=yc,
+        w_train=w,
+        xq=xq,
+        lam=RIDGE_LAMBDA,
+    )
     if CLIP_01:
         pred = float(np.clip(pred, 0.0, 1.0))
-    return pred, int(cand_idx.size), temp_thr_used, lat_thr_used
+    return pred, int(cand_idx.size), temp_thr_used
 
 
 # =========================================================
@@ -880,14 +853,14 @@ def predict_query_chunk(lib, qchunk):
     preds = np.full((Xq.shape[0],), np.nan, dtype=np.float32)
     ndon = np.zeros((Xq.shape[0],), dtype=np.int32)
     tthr = np.zeros((Xq.shape[0],), dtype=np.float32)
-    lthr = np.zeros((Xq.shape[0],), dtype=np.float32)
 
     for i in range(Xq.shape[0]):
-        pred, n_use, tt, lt = predict_one_query_local_two_stage(lib, Xq[i], float(tq[i]), float(lq[i]))
+        pred, n_use, tt = predict_one_query_local_ridge(
+            lib, Xq[i], float(tq[i]), float(lq[i])
+        )
         preds[i] = pred
         ndon[i] = n_use
         tthr[i] = tt
-        lthr[i] = lt
 
     out = {
         "year": qchunk["year"],
@@ -898,7 +871,6 @@ def predict_query_chunk(lib, qchunk):
     if SAVE_LOCAL_INFO:
         out["n_donors"] = ndon
         out["temp_thr"] = tthr
-        out["lat_thr"] = lthr
     return out
 
 
@@ -928,10 +900,9 @@ def _predict_full_block(lib, idx_slice, X_slice, tmp_slice, lat_slice):
     pred = np.full((n,), np.nan, dtype=np.float32)
     ndon = np.full((n,), -1, dtype=np.int32)
     tthr = np.full((n,), np.nan, dtype=np.float32)
-    lthr = np.full((n,), np.nan, dtype=np.float32)
 
     for i in range(n):
-        p, n_use, tt, lt = predict_one_query_local_two_stage(
+        p, n_use, tt = predict_one_query_local_ridge(
             lib,
             X_slice[i],
             float(tmp_slice[i]),
@@ -940,9 +911,8 @@ def _predict_full_block(lib, idx_slice, X_slice, tmp_slice, lat_slice):
         pred[i] = p
         ndon[i] = n_use
         tthr[i] = tt
-        lthr[i] = lt
 
-    return idx_slice, pred, ndon, tthr, lthr
+    return idx_slice, pred, ndon, tthr
 
 
 def predict_full_single_year_month(lib, cru, y_da, year, month, target_name):
@@ -959,7 +929,6 @@ def predict_full_single_year_month(lib, cru, y_da, year, month, target_name):
     pred_full = np.full((720 * 1440,), np.nan, dtype=np.float32)
     donor_n_full = np.full((720 * 1440,), -1, dtype=np.int32)
     temp_thr_full = np.full((720 * 1440,), np.nan, dtype=np.float32)
-    lat_thr_full = np.full((720 * 1440,), np.nan, dtype=np.float32)
 
     n = idx_valid.size
     block_ranges = [(st, min(n, st + FULLFIELD_BLOCK_SIZE)) for st in range(0, n, FULLFIELD_BLOCK_SIZE)]
@@ -980,16 +949,14 @@ def predict_full_single_year_month(lib, cru, y_da, year, month, target_name):
         for st, ed in block_ranges
     )
 
-    for idx_slice, pred, ndon, tthr, lthr in results:
+    for idx_slice, pred, ndon, tthr in results:
         pred_full[idx_slice] = pred
         donor_n_full[idx_slice] = ndon
         temp_thr_full[idx_slice] = tthr
-        lat_thr_full[idx_slice] = lthr
 
     arr_pred = pred_full.reshape(720, 1440)
     arr_ndon = donor_n_full.reshape(720, 1440)
     arr_tthr = temp_thr_full.reshape(720, 1440)
-    arr_lthr = lat_thr_full.reshape(720, 1440)
 
     truth_full = np.full((720 * 1440,), np.nan, dtype=np.float32)
     truth_full[idx_valid] = y_valid
@@ -1001,7 +968,6 @@ def predict_full_single_year_month(lib, cru, y_da, year, month, target_name):
             f"{target_name}_donor_n": (("lat", "lon"), arr_ndon),
             f"{target_name}_truth": (("lat", "lon"), arr_truth),
             f"{target_name}_temp_thr_used": (("lat", "lon"), arr_tthr),
-            f"{target_name}_lat_thr_used": (("lat", "lon"), arr_lthr),
         },
         coords={"lat": LAT_ARR, "lon": LON_ARR}
     )
@@ -1041,7 +1007,6 @@ def predict_historical_single_year_month(lib, cru, year, month, target_name):
     pred_full = np.full((720 * 1440,), np.nan, dtype=np.float32)
     donor_n_full = np.full((720 * 1440,), -1, dtype=np.int32)
     temp_thr_full = np.full((720 * 1440,), np.nan, dtype=np.float32)
-    lat_thr_full = np.full((720 * 1440,), np.nan, dtype=np.float32)
 
     n = idx_valid.size
     block_ranges = [
@@ -1069,16 +1034,14 @@ def predict_historical_single_year_month(lib, cru, year, month, target_name):
         for st, ed in block_ranges
     )
 
-    for idx_slice, pred, ndon, tthr, lthr in results:
+    for idx_slice, pred, ndon, tthr in results:
         pred_full[idx_slice] = pred
         donor_n_full[idx_slice] = ndon
         temp_thr_full[idx_slice] = tthr
-        lat_thr_full[idx_slice] = lthr
 
     arr_pred = pred_full.reshape(720, 1440)
     arr_ndon = donor_n_full.reshape(720, 1440)
     arr_tthr = temp_thr_full.reshape(720, 1440)
-    arr_lthr = lat_thr_full.reshape(720, 1440)
     time_value = np.array([np.datetime64(f"{year}-{month:02d}-15")])
 
     data_vars = {
@@ -1101,9 +1064,6 @@ def predict_historical_single_year_month(lib, cru, year, month, target_name):
             f"{target_name}_temp_thr_used": (
                 ("time", "lat", "lon"), arr_tthr[None, :, :], {"units": "degree_Celsius"}
             ),
-            f"{target_name}_lat_thr_used": (
-                ("time", "lat", "lon"), arr_lthr[None, :, :], {"units": "degree"}
-            ),
         })
 
     ds = xr.Dataset(
@@ -1115,7 +1075,13 @@ def predict_historical_single_year_month(lib, cru, year, month, target_name):
             "climate_predictors": ",".join(BASE_FEATS),
             "feature_mode": FEAT_MODE,
             "maximum_temperature_difference_degree_C": TEMP_THRESH_MAX_C,
-            "maximum_latitude_difference_degree": LAT_THRESH_MAX_DEG,
+            "temperature_threshold_initial_degree_C": TEMP_THRESH_INIT_C,
+            "temperature_threshold_growth_factor": TEMP_THRESH_GROW,
+            "minimum_candidate_count": MIN_DONORS,
+            "sigma_climate_distance": SIGMA_CLIM,
+            "sigma_temperature_degree_C": SIGMA_TEMP_C,
+            "sigma_latitude_degree": SIGMA_LAT_DEG,
+            "ridge_lambda": RIDGE_LAMBDA,
         },
     )
     ds.to_netcdf(out_nc)
@@ -1308,15 +1274,17 @@ def plot_hexbin_dense(y_true, y_pred, out_fp, gridsize=90, mincnt=5, bins="log",
 def main():
     t0 = time.time()
     print("=" * 120)
-    print("Local pixel-level donor selection and two-stage SCF reconstruction")
+    print("STIM-Snow local weighted-ridge SCF reconstruction")
     print(f"FEAT_MODE={FEAT_MODE}")
     print(f"TRAIN={TRAIN_START_YEAR}-{TRAIN_END_YEAR}")
     print(f"N_JOBS={N_JOBS}")
     print(f"FULLFIELD_N_JOBS={FULLFIELD_N_JOBS}")
     print(f"MAX_DONORS_PER_YEAR_MONTH={MAX_DONORS_PER_YEAR_MONTH}")
     print(f"TEMP_THRESH_INIT/MAX={TEMP_THRESH_INIT_C}/{TEMP_THRESH_MAX_C}")
-    print(f"LAT_THRESH_INIT/MAX={LAT_THRESH_INIT_DEG}/{LAT_THRESH_MAX_DEG}")
-    print(f"MIN_DONORS={MIN_DONORS}, MIN_POS_DONORS={MIN_POS_DONORS}, TOPK_AFTER_WEIGHT={TOPK_AFTER_WEIGHT}")
+    print(
+        f"MIN_DONORS={MIN_DONORS}, RIDGE_LAMBDA={RIDGE_LAMBDA}, "
+        f"SIGMAS(clim,temp,lat)={SIGMA_CLIM},{SIGMA_TEMP_C},{SIGMA_LAT_DEG}"
+    )
     print(f"PREDICT_FULL_FIELDS={PREDICT_FULL_FIELDS}")
     print(
         f"PREDICT_HISTORICAL_FIELDS={PREDICT_HISTORICAL_FIELDS}, "
