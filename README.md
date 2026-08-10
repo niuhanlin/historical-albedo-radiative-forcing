@@ -1,15 +1,231 @@
-# Historical Albedo Radiative Forcing
+# Historical surface albedo and radiative forcing (1700–2023)
 
-This repository will host the custom code supporting the reconstruction and analysis of global land surface albedo and its radiative forcing over 1700–2023.
+This repository contains the three principal analysis scripts supporting the
+historical snow-cover reconstruction, surface-albedo synthesis, and
+top-of-atmosphere shortwave radiative-forcing calculation.
 
-## Repository status
+## Code overview
 
-The code and documentation are being prepared and will be made available in this repository before the manuscript enters peer review.
+Run the scripts in the following order.
 
-## Data
+### 1. `reconstruct_historical_snow_cover.py`
 
-The workflow relies on large third-party remote-sensing, land-cover, snow-cover and climate datasets. These datasets are not stored in this repository. Data sources, preprocessing instructions, software dependencies and instructions for reproducing the analyses will be documented with the code release.
+Reconstructs monthly global snow cover fraction (SCF) for 1901–2000 using
+monthly CRU TS v4.08 climate variables and MODIS SCF observations from
+2001–2023.
 
-## Archiving
+For every target grid cell and month, donor observations are selected using an
+initial temperature tolerance of ±2 °C and latitude tolerance of ±10°. If fewer
+than 250 donors are available, the tolerances are progressively relaxed, but
+never beyond ±5 °C and ±15°. A local two-stage model estimates the occurrence
+and positive magnitude of SCF.
 
-Upon publication, a versioned release of the code will be archived in Zenodo and assigned a persistent DOI.
+The script then creates a unified set of yearly SCF files:
+
+- 1700–1900: monthly SCF fixed at the reconstructed 1901 values;
+- 1901–2000: reconstructed monthly SCF;
+- 2001–2023: observed monthly MODIS SCF.
+
+Output:
+
+```text
+snowfrac_025_1700_2023/snowfrac_025_<YEAR>.mat
+```
+
+Each file contains:
+
+```text
+snow_cover_frac_025   # dimensions: month, lat, lon = 12, 720, 1440
+```
+
+The script expects already prepared monthly MODIS SCF and CRU TS v4.08 data on
+the 0.25° grid. Raw daily MODIS preprocessing and the original CRU regridding
+are outside the scope of this repository.
+
+### 2. `synthesize_surface_albedo_5LC.py`
+
+Combines annual land-cover fractions, fixed monthly snow-free and snow-covered
+albedo lookup maps, and monthly SCF:
+
+```text
+alpha_sf = sum_c(f_c * alpha_sf,c)
+alpha_sn = sum_c(f_c * alpha_sn,c)
+alpha    = (1 - SCF) * alpha_sf + SCF * alpha_sn
+```
+
+The five reported land-cover classes are:
+
+1. Forest
+2. Shrubland
+3. Grassland
+4. Cropland
+5. Non-vegetated land
+
+The source fraction stack contains eight bands. The four forest
+subtypes (ENF, EBF, DNF and DBF) are grouped into the single forest class by
+summing their contributions. This aggregation preserves their combined albedo
+contribution exactly.
+
+The script produces two internally consistent albedo experiments:
+
+| Output | Land-cover fractions | SCF | Use |
+|---|---|---|---|
+| `dynamic` | Vary annually | Varies monthly and annually | Total RF |
+| `fixed1700` | Vary annually | Fixed at monthly 1700 values | Land-cover RF |
+
+Monthly output naming:
+
+```text
+albedo_synthesis_5LC_1700_2023/
+├── dynamic/monthly/albedo_weighted_<YEAR>_<MONTH>_0p25deg_global_wgs84.tif
+└── fixed1700/monthly/albedo_weighted_<YEAR>_<MONTH>_0p25deg_global_wgs84.tif
+```
+
+Source band 7 is defined as total cropland, including rice. The script verifies
+that all land-cover fractions sum to approximately one.
+
+### 3. `calculate_albedo_radiative_forcing.py`
+
+Calculates annual Earth-mean top-of-atmosphere shortwave radiative forcing from
+the two monthly albedo experiments using three all-sky albedo kernels:
+
+- CESM-CAM5 (`FSNT`);
+- HadGEM3-GA7.1 (`albedo_sw`);
+- HadGEM2 (`albedo`).
+
+For kernel `r`, year `y`, month `m`, and grid cell `x`:
+
+```text
+RF_r(y,m,x) = 100 * [alpha(y,m,x) - alpha(1700,m,x)]
+              * K_r(m,x) * M85(m,x)
+```
+
+The factor 100 converts fractional albedo change to percentage-point albedo
+change because the kernels are expressed per 1% albedo perturbation. `M85`
+excludes months/grid cells with local-noon solar zenith angles outside the
+selected threshold. Excluded contributions are set to zero and are not
+renormalized.
+
+Annual values use normal-year month-length weights. Earth-mean forcing is
+calculated using the whole-Earth area as the denominator, with ocean and masked
+land cells contributing zero to the global integral.
+
+The script calculates all three components in one run:
+
+```text
+RF_total      = RF(dynamic albedo)
+RF_landcover  = RF(fixed-1700-SCF albedo)
+RF_snow       = RF_total - RF_landcover
+```
+
+It writes annual GeoTIFFs for each kernel and their three-kernel mean, together
+with a CSV containing the annual Earth-mean time series and kernel envelope.
+
+## Required prepared inputs
+
+### Snow reconstruction
+
+- Monthly MODIS SCF MAT files for 2001–2023.
+- CRU TS v4.08 monthly precipitation, minimum temperature, mean temperature,
+  maximum temperature, and wet-day frequency for 1901–2023, already aligned to
+  the 0.25° grid.
+
+### Albedo synthesis
+
+- Annual 0.25° land-cover fraction GeoTIFFs for 1700–2023.
+- Fixed monthly snow-free and snow-covered land-cover-specific albedo lookup
+  GeoTIFFs.
+- Yearly SCF MAT files generated by the first script.
+
+### Radiative forcing
+
+- Monthly dynamic and fixed-1700-SCF albedo GeoTIFFs generated by the second
+  script.
+- CESM-CAM5, HadGEM3-GA7.1 and HadGEM2 monthly all-sky albedo-kernel NetCDF
+  files.
+
+Data files are not included because the input remote-sensing, climate,
+land-cover and radiative-kernel datasets are large and/or distributed by third
+parties.
+
+## Configuration
+
+The scripts use repository-relative `data/` and `outputs/` directories by
+default. Input and output locations can be overridden with environment
+variables without modifying the source code:
+
+```text
+HISTSNOW_DATA_DIR
+HISTSNOW_OUTPUT_DIR
+ALBEDO_DATA_DIR
+SNOWFREE_ALBEDO_DIR
+SNOWCOVERED_ALBEDO_DIR
+LANDCOVER_FRACTION_DIR
+SCF_DIR
+ALBEDO_OUTPUT_DIR
+RF_DATA_DIR
+RADIATIVE_KERNEL_DIR
+ALBEDO_ROOT
+RF_OUTPUT_DIR
+```
+
+`ALBEDO_OUTPUT_DIR` and `ALBEDO_ROOT` must refer to the same albedo-synthesis
+directory when non-default locations are used.
+
+The default parallel settings can be changed through environment variables:
+
+```bat
+set HISTSNOW_N_JOBS=12
+set HISTSNOW_FULLFIELD_N_JOBS=12
+set ALBEDO_WORKERS=8
+set RF_MAX_WORKERS=8
+```
+
+Use conservative worker counts initially. The historical pixel-level snow
+reconstruction and the RF kernel cache can require substantial memory.
+
+## Software requirements
+
+- Python 3.10 or later
+- NumPy
+- pandas
+- xarray
+- h5py
+- scikit-learn
+- joblib
+- matplotlib
+- rasterio
+- GDAL Python bindings
+- a NetCDF backend such as netCDF4 or h5netcdf
+
+Example:
+
+```bash
+conda install -c conda-forge python=3.11 numpy pandas xarray h5py scikit-learn joblib matplotlib rasterio gdal netcdf4
+```
+
+## Run
+
+```bash
+python reconstruct_historical_snow_cover.py
+python synthesize_surface_albedo_5LC.py
+python calculate_albedo_radiative_forcing.py
+```
+
+## Quality-control checks
+
+The scripts include checks for:
+
+- climate and MODIS grid dimensions and coordinate orientation;
+- maximum donor temperature and latitude tolerances;
+- SCF dimensions and physical range;
+- land-cover fraction closure;
+- GeoTIFF grid, transform and projection consistency;
+- missing class-specific albedo where class fractions are non-zero;
+- albedo range and complete 12-month annual means;
+- all-sky kernel variables and kernel-grid interpolation;
+- identical 1700 baselines between the dynamic and fixed-SCF experiments;
+- numerical closure: `RF_total = RF_landcover + RF_snow`.
+
+Greenland and Antarctica must be handled consistently with the manuscript mask
+in the prepared land-cover/albedo inputs and subsequent figures.
