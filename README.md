@@ -148,6 +148,28 @@ Data files are not included because the input remote-sensing, climate,
 land-cover and radiative-kernel datasets are large and/or distributed by third
 parties.
 
+## Data access
+
+The third-party datasets used to prepare the model inputs are available from
+their original repositories:
+
+| Dataset | Use in this study | Official access |
+|---|---|---|
+| MODIS/Terra+Aqua BRDF/Albedo Daily L3 Global 500 m, Collection 6.1 (`MCD43A3`) | Snow-free and snow-covered shortwave-albedo lookup tables | [NASA LP DAAC](https://doi.org/10.5067/MODIS/MCD43A3.061) |
+| MODIS/Terra+Aqua Land Cover Type Yearly L3 Global 500 m, Collection 6.1 (`MCD12Q1`) | Classification of the five land-cover types used to construct the albedo lookup tables | [NASA LP DAAC](https://doi.org/10.5067/MODIS/MCD12Q1.061) |
+| MODIS/Terra Snow Cover Monthly L3 Global 0.05° CMG, Collection 6.1 (`MOD10CM`) | Observed monthly snow cover fraction for 2001–2023 and the target variable for the historical reconstruction | [NASA NSIDC DAAC](https://doi.org/10.5067/MODIS/MOD10CM.061) |
+| CRU TS v4.08 | Monthly precipitation, minimum temperature, mean temperature, maximum temperature and wet-day frequency for the snow-cover reconstruction | [Climatic Research Unit, University of East Anglia](https://crudata.uea.ac.uk/cru/data/hrg/cru_ts_4.08/) |
+| Land-Use Harmonization v2 (`LUH2`) | Annual historical land-cover fractions and land-cover transitions | [University of Maryland LUH2 data portal](https://luh.umd.edu/data.shtml) |
+| CESM-CAM5 radiative kernels | All-sky shortwave surface-albedo kernel | [UCAR/NCAR Research Data Archive](https://doi.org/10.5065/D6F47MT6) |
+| HadGEM3-GA7.1 radiative kernels | All-sky shortwave surface-albedo kernel | [Zenodo](https://doi.org/10.5281/zenodo.3594673) |
+| HadGEM2 radiative kernels | All-sky shortwave surface-albedo kernel | [Research Data Leeds Repository](https://doi.org/10.5518/406) |
+
+A NASA Earthdata Login is required to access the MODIS products. Users should
+follow the licences and citation requirements specified by each data provider.
+The source datasets must be processed to the grids, variables and file layouts
+described under **Required prepared inputs** before running the scripts; the
+downloaded source files are not direct script inputs.
+
 ## Configuration
 
 The scripts use repository-relative `data/` and `outputs/` directories by
