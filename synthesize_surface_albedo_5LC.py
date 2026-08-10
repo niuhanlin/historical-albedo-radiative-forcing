@@ -7,9 +7,8 @@ The calculation follows the manuscript equations:
     alpha_sn = sum_c(f_c * alpha_sn,c)
     alpha    = (1 - SCF) * alpha_sf + SCF * alpha_sn
 
-The five reported classes are forest, shrubland, grassland, cropland and
-non-vegetated land. Four source forest subtypes are grouped as one forest
-class without changing their combined contribution.
+The five input classes are forest, shrubland, grassland, cropland and
+non-vegetated land.
 
 Two products are written in one run:
     dynamic  : annual land cover + annual/monthly SCF (total albedo)
@@ -93,15 +92,15 @@ SKIP_COMPLETE_YEARS = True
 WRITE_ANNUAL_MEAN = True
 MAX_WORKERS = int(os.environ.get("ALBEDO_WORKERS", "8"))
 
-# Five manuscript classes assembled from the existing 8-band source stack.
-# Band 7 must already represent total cropland, including rice.
-FIVE_CLASSES = {
-    "forest": (("enf", 1), ("ebf", 2), ("dnf", 3), ("dbf", 4)),
-    "shrub": (("shrub", 5),),
-    "grass": (("grass", 6),),
-    "crop": (("norice_crop", 7),),
-    "nonveg": (("nonveg", 8),),
-}
+# One-based band order in each annual five-band land-cover fraction stack.
+# The same names are used for the lookup-table subdirectories and filenames.
+LAND_COVER_CLASSES = (
+    ("forest", 1),
+    ("shrubland", 2),
+    ("grassland", 3),
+    ("cropland", 4),
+    ("nonvegetated", 5),
+)
 
 
 # =============================================================================
@@ -221,14 +220,18 @@ def read_fraction_stack(year, ref_gt, ref_projection, rows, cols):
     path = FRACTION_DIR / f"LUH2_HYDE_fused_{year}_global0.25D.tif"
     ds = open_raster(path)
     assert_grid(ds, ref_gt, ref_projection, rows, cols, str(path))
-    if ds.RasterCount < 8:
-        raise RuntimeError(f"Expected 8 fraction bands in {path}; found {ds.RasterCount}")
+    expected_bands = len(LAND_COVER_CLASSES)
+    if ds.RasterCount != expected_bands:
+        raise RuntimeError(
+            f"Expected {expected_bands} land-cover fraction bands in {path}; "
+            f"found {ds.RasterCount}"
+        )
     raw = ds.ReadAsArray().astype(np.float32)
     ds = None
-    if raw.ndim != 3 or raw.shape[0] < 8:
+    if raw.ndim != 3 or raw.shape[0] != expected_bands:
         raise RuntimeError(f"Unexpected fraction-stack shape in {path}: {raw.shape}")
 
-    fractions = raw[:8] / np.float32(FRACTION_SCALE)
+    fractions = raw / np.float32(FRACTION_SCALE)
     fractions[~np.isfinite(fractions)] = 0.0
     fractions = np.clip(fractions, 0.0, 1.0)
     fraction_sum = np.sum(fractions, axis=0)
@@ -238,8 +241,7 @@ def read_fraction_stack(year, ref_gt, ref_projection, rows, cols):
         values = fraction_sum[bad]
         raise RuntimeError(
             f"Land-cover fractions fail closure in {bad.sum()} cells for {year}; "
-            f"invalid range={values.min():.4f}–{values.max():.4f}. "
-            "Confirm that band 7 includes rice and that no class is omitted."
+            f"invalid range={values.min():.4f}–{values.max():.4f}."
         )
     return fractions, land
 
@@ -334,27 +336,22 @@ def synthesize_state_albedo(
     total = np.zeros((rows, cols), dtype=np.float32)
     missing_required = np.zeros((rows, cols), dtype=bool)
 
-    # The outer loop contains exactly the five manuscript classes. Forest
-    # internally sums its four source subtypes.
-    for _, members in FIVE_CLASSES.items():
-        class_contribution = np.zeros((rows, cols), dtype=np.float32)
-        for source_name, one_based_band in members:
-            fraction = fractions[one_based_band - 1]
-            endmember = read_endmember(
-                condition,
-                source_name,
-                year,
-                month,
-                ref_gt,
-                ref_projection,
-                rows,
-                cols,
-            )
-            missing_required |= (fraction > FRACTION_EPS) & (~np.isfinite(endmember))
-            class_contribution += np.where(
-                np.isfinite(endmember), fraction * endmember, 0.0
-            ).astype(np.float32)
-        total += class_contribution
+    for source_name, one_based_band in LAND_COVER_CLASSES:
+        fraction = fractions[one_based_band - 1]
+        endmember = read_endmember(
+            condition,
+            source_name,
+            year,
+            month,
+            ref_gt,
+            ref_projection,
+            rows,
+            cols,
+        )
+        missing_required |= (fraction > FRACTION_EPS) & (~np.isfinite(endmember))
+        total += np.where(
+            np.isfinite(endmember), fraction * endmember, 0.0
+        ).astype(np.float32)
     return total, missing_required
 
 
