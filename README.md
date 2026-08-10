@@ -47,7 +47,8 @@ The script uses monthly MODIS SCF and CRU TS v4.08 variables harmonized to the
 ### 2. `synthesize_surface_albedo_5LC.py`
 
 Combines annual land-cover fractions, fixed monthly snow-free and snow-covered
-albedo lookup maps, and monthly SCF:
+albedo lookup maps derived for 2020, and monthly SCF. The 2020 lookup maps are
+held fixed throughout 1700–2023:
 
 ```text
 alpha_sf = sum_c(f_c * alpha_sf,c)
