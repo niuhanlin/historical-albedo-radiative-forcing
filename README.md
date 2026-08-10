@@ -156,6 +156,7 @@ their original repositories:
 | Dataset | Use in this study | Official access |
 |---|---|---|
 | MODIS/Terra+Aqua BRDF/Albedo Daily L3 Global 500 m, Collection 6.1 (`MCD43A3`) | Snow-free and snow-covered shortwave-albedo lookup tables | [NASA LP DAAC](https://doi.org/10.5067/MODIS/MCD43A3.061) |
+| MODIS/Terra+Aqua BRDF/Albedo Quality Daily L3 Global 500 m, Collection 6.1 (`MCD43A2`) | BRDF/albedo quality information and the snow-status flag used to distinguish snow-free and snow-covered retrievals | [NASA LP DAAC](https://doi.org/10.5067/MODIS/MCD43A2.061) |
 | MODIS/Terra+Aqua Land Cover Type Yearly L3 Global 500 m, Collection 6.1 (`MCD12Q1`) | Classification of the five land-cover types used to construct the albedo lookup tables | [NASA LP DAAC](https://doi.org/10.5067/MODIS/MCD12Q1.061) |
 | MODIS/Terra Snow Cover Monthly L3 Global 0.05° CMG, Collection 6.1 (`MOD10CM`) | Observed monthly snow cover fraction for 2001–2023 and the target variable for the historical reconstruction | [NASA NSIDC DAAC](https://doi.org/10.5067/MODIS/MOD10CM.061) |
 | CRU TS v4.08 | Monthly precipitation, minimum temperature, mean temperature, maximum temperature and wet-day frequency for the snow-cover reconstruction | [Climatic Research Unit, University of East Anglia](https://crudata.uea.ac.uk/cru/data/hrg/cru_ts_4.08/) |
